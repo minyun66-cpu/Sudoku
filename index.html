@@ -118,6 +118,7 @@
     <div>
       <label class="radio"><input type="radio" name="mode" value="clean" checked> 乾淨解答盤</label>
       <label class="radio"><input type="radio" name="mode" value="overlay"> 疊加在原圖上</label>
+      <label class="radio"><input type="radio" name="mode" value="bydigit"> 逐數字填寫對照（配合 APP「連續填入」）</label>
     </div>
     <canvas id="out" hidden></canvas>
     <img id="outImg" alt="數獨解答" style="max-width:100%;height:auto;display:block;margin:10px auto 0;border:1px solid var(--line);border-radius:4px;background:#fff">
@@ -796,7 +797,9 @@ function drawDigit(ctx, text, cx, cy, size, color, outline) {
 function drawOutput() {
   if (!st.solution) return;
   const mode = document.querySelector('input[name=mode]:checked').value;
-  if (mode === 'overlay' && st.src && st.rect) drawOverlay(); else drawClean();
+  if (mode === 'overlay' && st.src && st.rect) drawOverlay();
+  else if (mode === 'bydigit') drawByDigit();
+  else drawClean();
   $('outImg').src = out.toDataURL('image/png');   // 以 <img> 顯示，方便長按儲存
 }
 
@@ -826,6 +829,42 @@ function drawOverlay() {
     drawDigit(octx, String(st.solution[i]), cx, cy, Math.min(cw, ch) * 0.62, '#2563eb', 'rgba(255,255,255,.95)');
   }
 }
+
+/* 逐數字填寫對照：9 張小盤面（數字 1–9 各一張），只標出該數字要填的格子。
+ * 搭配遊戲的「連續填入」：先選數字，再連續點這些格子，一個數字只需切換一次。
+ * 藍底＝要填的格子；灰底＝題目本來就有的同數字（供對位參考）。 */
+function drawByDigit() {
+  const TW = 400, TH = 460, G = 20, B = 380, cs = B / 9;
+  out.width = 3 * TW + 4 * G; out.height = 3 * TH + 4 * G;
+  octx.fillStyle = '#eef0f4'; octx.fillRect(0, 0, out.width, out.height);
+  for (let d = 1; d <= 9; d++) {
+    const tx = G + ((d - 1) % 3) * (TW + G), ty = G + (((d - 1) / 3) | 0) * (TH + G);
+    octx.fillStyle = '#fff'; octx.fillRect(tx, ty, TW, TH);
+    const need = [];
+    for (let i = 0; i < 81; i++) if (!st.givens[i] && st.solution[i] === d) need.push(i);
+    // 標題
+    octx.textBaseline = 'middle'; octx.textAlign = 'left';
+    octx.fillStyle = ANS; octx.font = '700 44px "Helvetica Neue", Arial, sans-serif';
+    octx.fillText(String(d), tx + 14, ty + 32);
+    octx.fillStyle = '#6b7280'; octx.font = '500 22px "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+    octx.textAlign = 'right'; octx.fillText(`需填 ${need.length} 格`, tx + TW - 14, ty + 34);
+    // 小盤面
+    const bx = tx + 10, by = ty + 70;
+    for (let i = 0; i < 81; i++) {
+      const x = bx + (i % 9) * cs, y = by + ((i / 9) | 0) * cs;
+      if (st.solution[i] !== d) continue;
+      const fill = !st.givens[i];
+      octx.fillStyle = fill ? ANS : '#d1d5db'; octx.fillRect(x + 1, y + 1, cs - 2, cs - 2);
+      drawDigit(octx, String(d), x + cs / 2, y + cs / 2, cs * 0.66, fill ? '#fff' : '#6b7280');
+    }
+    for (let i = 0; i <= 9; i++) {
+      octx.strokeStyle = '#111'; octx.lineWidth = i % 3 === 0 ? 3 : 1;
+      octx.beginPath(); octx.moveTo(bx + i * cs, by); octx.lineTo(bx + i * cs, by + B);
+      octx.moveTo(bx, by + i * cs); octx.lineTo(bx + B, by + i * cs); octx.stroke();
+    }
+  }
+}
+
 document.querySelectorAll('input[name=mode]').forEach(el => el.addEventListener('change', drawOutput));
 
 $('btnDownload').addEventListener('click', () => {
