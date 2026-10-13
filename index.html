@@ -92,6 +92,7 @@
       <input type="file" id="file" accept="image/*">
       <button id="btnDetect" disabled>自動偵測網格</button>
       <button id="btnRun" class="primary" disabled>開始辨識與解答</button>
+      <button id="btnManual">或：直接手動輸入題目</button>
     </div>
     <p class="hint">紅框應剛好框住 9×9 盤面；若有偏差，拖曳四個角或框內移動來校正，再按「開始辨識與解答」。（手機請從圖片外側捲動頁面）</p>
     <div class="stage" id="stage" style="margin-top:10px" hidden><canvas id="preview"></canvas></div>
@@ -100,14 +101,20 @@
 
   <!-- 步驟 2：辨識結果（可修正） -->
   <section id="secEdit" hidden>
-    <h2>2. 檢查辨識結果</h2>
+    <h2>2. 題目盤面（辨識結果／手動輸入）</h2>
+    <details id="pasteBox" style="margin-bottom:12px">
+      <summary style="cursor:pointer">貼上／匯出題目文字（81 個字元）</summary>
+      <p class="hint">1–9 為已知數字，0、「.」、「_」、「-」代表空格；換行與空白會自動忽略。可以從別處複製整盤題目貼進來，也能把目前盤面匯出成文字。</p>
+      <textarea id="pasteText" rows="4" spellcheck="false" style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.95rem;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px" placeholder="例如：&#10;..613..2.&#10;....6...5&#10;...5.8..3&#10;..."></textarea>
+      <div class="row"><button id="btnApplyText">套用到盤面</button><button id="btnExportText">匯出目前盤面</button></div>
+    </details>
     <div class="cmp">
       <canvas id="cropView" title="原圖盤面"></canvas>
       <div id="editGrid"></div>
     </div>
-    <p class="legend">左：原圖盤面　右：辨識結果。黃框／黃底＝信心低或疑似漏辨識（請對照原圖，特別注意「原圖有數字、右邊卻是空白」的格子）；紅＝同行／列／宮有重複。點右邊格子即可修改（輸入 1–9，刪除則留空）。</p>
+    <p class="legend">左：原圖盤面　右：辨識結果。黃框／黃底＝信心低或疑似漏辨識（請對照原圖，特別注意「原圖有數字、右邊卻是空白」的格子）；紅＝同行／列／宮有重複。點右邊格子即可修改（輸入 1–9，刪除則留空）。鍵盤操作：輸入數字會自動跳下一格、方向鍵移動、Backspace／0 清除、Enter 直接解答。</p>
     <div class="row" style="justify-content:center">
-      <button id="btnSolve" class="primary">重新解答</button>
+      <button id="btnSolve" class="primary">解答</button>
       <button id="btnClear">清空盤面</button>
     </div>
   </section>
@@ -606,6 +613,22 @@ const cells = [];
       const v = el.value.replace(/[^1-9]/g, '').slice(-1);
       el.value = v;
       onCellEdit(i, v ? +v : 0);
+      if (v && i < 80) cells[i + 1].focus();          // 輸入後自動跳到下一格
+    });
+    el.addEventListener('keydown', e => {
+      const step = { ArrowUp: -9, ArrowDown: 9, ArrowLeft: -1, ArrowRight: 1 }[e.key];
+      if (step) {                                      // 方向鍵移動（左右不跨列）
+        e.preventDefault();
+        const j = i + step;
+        if (j >= 0 && j < 81 && !(step === -1 && c === 0) && !(step === 1 && c === 8)) cells[j].focus();
+      } else if (e.key === 'Enter') {
+        e.preventDefault(); solveAndShow();
+      } else if (e.key === 'Backspace' || e.key === 'Delete' || e.key === '0' || e.key === ' ') {
+        e.preventDefault();
+        const wasEmpty = el.value === '';
+        el.value = ''; onCellEdit(i, 0);
+        if (e.key === 'Backspace' && wasEmpty && i > 0) cells[i - 1].focus();   // 空格再按退格 → 回上一格
+      }
     });
     box.appendChild(el); cells.push(el);
   }
@@ -623,7 +646,9 @@ function renderEditGrid(lowSet) {
 /* 左側原圖盤面：用實際格線畫出黃框（需確認）／紅框（衝突） */
 function renderCrop() {
   const cv = $('cropView');
-  if (!st.src || !st.rect) return;
+  const show = !!(st.src && st.rect && st.lines);
+  cv.hidden = !show;          // 手動輸入（沒有圖片）時不顯示對照圖
+  if (!show) return;
   const W = 420, r = st.rect; cv.width = W; cv.height = W;
   const x = cv.getContext('2d');
   x.drawImage(st.src, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, 0, 0, W, W);
@@ -754,6 +779,9 @@ function solveAndShow() {
   }
   st.solution = res.solution; st.givens = st.grid.slice();
   $('secOut').hidden = false;
+  const ov = document.querySelector('input[name=mode][value=overlay]');   // 沒有圖片就不能疊加原圖
+  ov.disabled = !st.src;
+  if (ov.disabled && ov.checked) document.querySelector('input[name=mode][value=clean]').checked = true;
   drawOutput();
   let msg = `解題完成（${ms} ms）。`;
   if (res.capped) msg += ' 未能在時限內確認是否唯一解。';
@@ -761,6 +789,50 @@ function solveAndShow() {
   setStatus(msg, 'ok');
 }
 $('btnSolve').addEventListener('click', solveAndShow);
+
+
+/* =====================================================================
+ * 手動輸入模式：不用圖片，直接在盤面輸入題目後解答（適合電腦使用）
+ * ===================================================================== */
+function openManual() {
+  if ($('secEdit').hidden) {            // 尚未有盤面 → 建立空白盤面（已有內容則保留）
+    st.grid.fill(0); st.recog.fill(0); st.feat.fill(null);
+    st.lines = null; st.edited.clear(); st.lowSet = new Set();
+    $('secEdit').hidden = false;
+    renderEditGrid(new Set());
+  }
+  $('secEdit').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  cells[0].focus();
+  setStatus('請在盤面輸入題目數字，完成後按 Enter 或「解答」。');
+}
+$('btnManual').addEventListener('click', openManual);
+
+/* 把文字解析成 81 格：1–9 為數字，0 . _ - * 為空格，其餘字元（空白、換行、逗號等）忽略 */
+function parseSudokuText(t) {
+  const out = [];
+  for (const ch of t) {
+    if (ch >= '1' && ch <= '9') out.push(+ch);
+    else if ('0._-*＿'.includes(ch)) out.push(0);
+  }
+  return out;
+}
+$('btnApplyText').addEventListener('click', () => {
+  const arr = parseSudokuText($('pasteText').value);
+  if (arr.length !== 81) { setStatus(`讀到 ${arr.length} 個格子，需要剛好 81 個。請檢查貼上的內容。`, 'err'); return; }
+  st.grid = arr; st.recog = arr.slice(); st.feat.fill(null); st.lines = null;
+  st.edited.clear(); st.lowSet = new Set();
+  renderEditGrid(new Set());
+  solveAndShow();
+});
+$('btnExportText').addEventListener('click', () => {
+  const rows = [];
+  for (let r = 0; r < 9; r++) rows.push(st.grid.slice(r * 9, r * 9 + 9).map(v => v || '.').join(''));
+  const txt = rows.join('\n');
+  $('pasteText').value = txt; $('pasteText').select();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(() => setStatus('已匯出並複製到剪貼簿。', 'ok'), () => setStatus('已匯出到文字框，請手動複製。', 'ok'));
+  } else setStatus('已匯出到文字框，請手動複製。', 'ok');
+});
 
 /* 主按鈕：辨識 → 顯示可編輯盤面 → 自動解題 */
 $('btnRun').addEventListener('click', async () => {
