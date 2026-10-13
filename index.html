@@ -59,9 +59,11 @@
   #preview { max-width: 100%; height: auto; touch-action: none; cursor: crosshair; border-radius: 4px; }
 
   /* 辨識結果編輯盤面 */
+  .cmp { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; align-items: flex-start; }
+  #cropView { width: min(100%, 420px); height: auto; border-radius: 4px; }
   #editGrid {
     display: grid; grid-template-columns: repeat(9, 1fr);
-    width: min(100%, 420px); margin: 0 auto; border: 3px solid var(--text);
+    width: min(100%, 420px); border: 3px solid var(--text);
   }
   #editGrid input {
     width: 100%; aspect-ratio: 1; min-width: 0; text-align: center; font-size: 1.35rem; font-weight: 600;
@@ -99,8 +101,11 @@
   <!-- 步驟 2：辨識結果（可修正） -->
   <section id="secEdit" hidden>
     <h2>2. 檢查辨識結果</h2>
-    <div id="editGrid"></div>
-    <p class="legend">黃底＝辨識信心較低　紅底＝同行／列／宮有重複數字。點格子即可修改（輸入 1–9，清除則留空）。</p>
+    <div class="cmp">
+      <canvas id="cropView" title="原圖盤面"></canvas>
+      <div id="editGrid"></div>
+    </div>
+    <p class="legend">左：原圖盤面　右：辨識結果。黃框／黃底＝信心低或疑似漏辨識（請對照原圖，特別注意「原圖有數字、右邊卻是空白」的格子）；紅＝同行／列／宮有重複。點右邊格子即可修改（輸入 1–9，刪除則留空）。</p>
     <div class="row" style="justify-content:center">
       <button id="btnSolve" class="primary">重新解答</button>
       <button id="btnClear">清空盤面</button>
@@ -142,7 +147,10 @@ const st = {
   feat: new Array(81).fill(null),  // 每格的特徵（用於「從修正中學習」）
   solution: null, givens: null,
   templates: null,      // 內建字型樣板
-  learned: []           // 使用者修正後學到的樣板
+  learned: [],          // 使用者修正後學到的樣板
+  lines: null,          // 實際格線位置（GS 座標）
+  lowSet: new Set(),    // 需人工確認的格子
+  edited: new Set()     // 使用者手動改過的格子
 };
 
 const prev = $('preview'), pctx = prev.getContext('2d');
@@ -376,13 +384,66 @@ $('btnDetect').addEventListener('click', autoDetect);
 
 /* =====================================================================
  * 三、數字辨識（樣板比對，純前端、無需外部套件）
- *  1) 把盤面裁切並縮放成 576×576，每格 64×64
- *  2) 每格取內縮區域，用「與背景的差異」二值化（自動適應深／淺色數字）
- *  3) 刪掉碰到區域邊緣的連通塊（那是格線），剩下的即數字
- *  4) 數字外框縮放成 12×16 的灰階特徵，與內建字型樣板 + 學習樣板比對
+ *  1) 把盤面裁成 900×900，先找出 10+10 條「實際格線」位置（不依賴等分，抗偏移）
+ *  2) 依實際格線切出每格內部，用「與背景的差異」二值化（自動適應深／淺色數字）
+ *  3) 刪掉貼邊的格線殘留，剩下的即數字；判成空格但有痕跡者改用寬鬆門檻再試並標黃
+ *  4) 數字外框縮放成 12×16 特徵，與內建字型樣板 + 使用者修正學到的樣板比對
  * ===================================================================== */
-const FW = 12, FH = 16;      // 特徵網格大小
-const CELL = 64, INSET = 7;  // 每格尺寸與內縮像素
+/*PURE-START*/
+const FW = 12, FH = 16;   // 數字特徵網格大小
+const GS = 900;           // 盤面標準化邊長（像素）
+const CN = 56;            // 每格取樣邊長（像素）
+
+function median(arr) { const c = Float32Array.from(arr); c.sort(); return c[c.length >> 1]; }
+
+/* 找出 10 條實際格線位置（軸 'x' = 垂直線的 x 座標；'y' = 水平線的 y 座標）
+ *  做法：沿線方向取「中位數亮度」，格線整條都比格子暗（或亮），數字只佔少數像素不影響中位數，
+ *  再在理論位置附近找偏離最大的位置。這樣即使紅框略有偏差、宮與宮之間的縫比較寬，也能對準。 */
+function findLines(lum, S, axis) {
+  const prof = new Float32Array(S), buf = new Float32Array(S);
+  for (let a = 0; a < S; a++) {
+    if (axis === 'x') for (let b = 0; b < S; b++) buf[b] = lum[b * S + a];
+    else for (let b = 0; b < S; b++) buf[b] = lum[a * S + b];
+    prof[a] = median(buf);
+  }
+  const base = median(prof), dev = new Float32Array(S);
+  for (let a = 0; a < S; a++) {            // 5 點平滑後的偏離量
+    let sum = 0, n = 0;
+    for (let k = -2; k <= 2; k++) { const j = a + k; if (j >= 0 && j < S) { sum += Math.abs(prof[j] - base); n++; } }
+    dev[a] = sum / n;
+  }
+  const pitch = S / 9, lines = [], uniform = [];
+  for (let i = 0; i <= 9; i++) {
+    const e = Math.min(S - 1, i * pitch), win = (i === 0 || i === 9) ? 0.3 * pitch : 0.22 * pitch;
+    const lo = Math.max(0, Math.round(e - win)), hi = Math.min(S - 1, Math.round(e + win));
+    let bi = Math.round(e), bv = -1;
+    for (let a = lo; a <= hi; a++) if (dev[a] > bv) { bv = dev[a]; bi = a; }
+    lines.push(bv >= 5 ? bi : e);          // 訊號太弱就用理論位置
+    uniform.push(e);
+  }
+  for (let i = 0; i < 9; i++) {            // 間距不合理 → 退回等分
+    const g = lines[i + 1] - lines[i];
+    if (g < 0.7 * pitch || g > 1.3 * pitch) return uniform;
+  }
+  return lines;
+}
+
+/* 取出某格內部區域，以方塊平均縮放成 N×N 的亮度陣列 */
+function sampleCell(lum, S, x0, y0, x1, y1, N) {
+  const out = new Float32Array(N * N);
+  for (let j = 0; j < N; j++) {
+    const ys = y0 + (y1 - y0) * j / N, ye = y0 + (y1 - y0) * (j + 1) / N;
+    const iy0 = Math.max(0, Math.floor(ys)), iy1 = Math.min(S - 1, Math.max(iy0, Math.ceil(ye) - 1));
+    for (let i = 0; i < N; i++) {
+      const xs = x0 + (x1 - x0) * i / N, xe = x0 + (x1 - x0) * (i + 1) / N;
+      const ix0 = Math.max(0, Math.floor(xs)), ix1 = Math.min(S - 1, Math.max(ix0, Math.ceil(xe) - 1));
+      let sum = 0, n = 0;
+      for (let y = iy0; y <= iy1; y++) for (let x = ix0; x <= ix1; x++) { sum += lum[y * S + x]; n++; }
+      out[j * N + i] = sum / n;
+    }
+  }
+  return out;
+}
 
 /* 由二值遮罩取出外框並縮放成 FW×FH 的覆蓋率特徵 */
 function extract(mask, W, H) {
@@ -406,6 +467,53 @@ function extract(mask, W, H) {
   return { f, asp: bw / bh, count: cnt };
 }
 
+/* 分析單一格（亮度陣列 n×n）。
+ *  relaxed = false：嚴格模式；true：寬鬆模式（較低的二值化門檻，用來救回淡色數字）
+ *  回傳 {ex, total}：ex 為數字特徵（空格為 null），total 為判定為「數字」的像素數 */
+function analyzeCell(lum, n, relaxed) {
+  const sorted = Float32Array.from(lum).sort();
+  const bg = sorted[sorted.length >> 1];
+  const range = sorted[Math.floor(sorted.length * 0.99)] - sorted[Math.floor(sorted.length * 0.01)];
+  const T = relaxed ? Math.max(18, 0.22 * range) : Math.max(35, 0.4 * range);
+  const mask = new Uint8Array(n * n);
+  for (let i = 0; i < n * n; i++) mask[i] = Math.abs(lum[i] - bg) > T ? 1 : 0;
+
+  // 連通塊標記（8 鄰域）。碰到邊緣、且「像格線殘留」的連通塊丟棄：
+  //   像格線 = 細長貼邊，或外框中心落在最外圈 15% 內（鄰格數字的碎片）
+  const seen = new Uint8Array(n * n), keep = new Uint8Array(n * n), stack = [], minSize = relaxed ? 4 : 6;
+  let total = 0;
+  for (let i0 = 0; i0 < n * n; i0++) {
+    if (!mask[i0] || seen[i0]) continue;
+    const comp = []; let touch = false, mnx = n, mxx = -1, mny = n, mxy = -1;
+    stack.push(i0); seen[i0] = 1;
+    while (stack.length) {
+      const i = stack.pop(); comp.push(i);
+      const x = i % n, y = (i / n) | 0;
+      if (x === 0 || y === 0 || x === n - 1 || y === n - 1) touch = true;
+      if (x < mnx) mnx = x; if (x > mxx) mxx = x; if (y < mny) mny = y; if (y > mxy) mxy = y;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        const j = ny * n + nx;
+        if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+      }
+    }
+    if (comp.length < minSize) continue;
+    if (touch) {
+      const w = mxx - mnx + 1, h = mxy - mny + 1, cx = (mnx + mxx) / 2, cy = (mny + mxy) / 2;
+      const tall = h >= 0.7 * n && w <= 0.25 * n && (mxx < 0.3 * n || mnx > 0.7 * n);
+      const wide = w >= 0.7 * n && h <= 0.25 * n && (mxy < 0.3 * n || mny > 0.7 * n);
+      const ring = cx < 0.15 * n || cx > 0.85 * n || cy < 0.15 * n || cy > 0.85 * n;
+      if (tall || wide || ring) continue;
+    }
+    for (const i of comp) keep[i] = 1;
+    total += comp.length;
+  }
+  if (total < 40) return { ex: null, total };
+  return { ex: extract(keep, n, n), total };
+}
+/*PURE-END*/
+
 /* 以多種系統字型繪製 1–9 作為內建樣板（延遲建立，只做一次） */
 function buildTemplates() {
   const fonts = ['Arial', 'Helvetica', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Segoe UI', 'Roboto',
@@ -428,44 +536,6 @@ function buildTemplates() {
   return list;
 }
 
-/* 分析單一格：回傳 {f, asp} 或 null（空格） */
-function analyzeCell(data, S, r, c) {
-  const n = CELL - 2 * INSET, lum = new Float32Array(n * n);
-  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-    const i = ((r * CELL + INSET + y) * S + (c * CELL + INSET + x)) * 4;
-    lum[y * n + x] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-  }
-  const sorted = Float32Array.from(lum).sort();
-  const bg = sorted[sorted.length >> 1];
-  const range = sorted[Math.floor(sorted.length * 0.99)] - sorted[Math.floor(sorted.length * 0.01)];
-  const T = Math.max(35, 0.4 * range);
-  const mask = new Uint8Array(n * n);
-  for (let i = 0; i < n * n; i++) mask[i] = Math.abs(lum[i] - bg) > T ? 1 : 0;
-
-  // 連通塊標記（8 鄰域）；碰到邊緣者（格線）與過小者（雜訊）丟棄
-  const seen = new Uint8Array(n * n), keep = new Uint8Array(n * n), stack = [];
-  let total = 0;
-  for (let i0 = 0; i0 < n * n; i0++) {
-    if (!mask[i0] || seen[i0]) continue;
-    const comp = []; let touch = false;
-    stack.push(i0); seen[i0] = 1;
-    while (stack.length) {
-      const i = stack.pop(); comp.push(i);
-      const x = i % n, y = (i / n) | 0;
-      if (x === 0 || y === 0 || x === n - 1 || y === n - 1) touch = true;
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-        const nx = x + dx, ny = y + dy;
-        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
-        const j = ny * n + nx;
-        if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
-      }
-    }
-    if (!touch && comp.length >= 6) { for (const i of comp) keep[i] = 1; total += comp.length; }
-  }
-  if (total < 40) return null;
-  return extract(keep, n, n);
-}
-
 /* 與樣板比對，回傳最佳數字與信心（第二名 / 第一名 的代價比） */
 function classify(ex) {
   const best = new Array(10).fill(Infinity), all = st.templates.concat(st.learned);
@@ -479,22 +549,40 @@ function classify(ex) {
   return { d: order[0], cost: best[order[0]], margin: best[order[1]] / (best[order[0]] + 1e-6) };
 }
 
+/* 把盤面範圍裁成 GS×GS 的亮度陣列 */
+function boardLum() {
+  const r = st.rect, g = document.createElement('canvas'); g.width = GS; g.height = GS;
+  const gx = g.getContext('2d', { willReadFrequently: true });
+  gx.imageSmoothingQuality = 'high';
+  gx.drawImage(st.src, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, 0, 0, GS, GS);
+  const d = gx.getImageData(0, 0, GS, GS).data, lum = new Float32Array(GS * GS);
+  for (let i = 0; i < GS * GS; i++) lum[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2];
+  return lum;
+}
+
+/* 整張盤面辨識。回傳「需要人工確認」的格子集合（信心低、或疑似漏辨識） */
 function recognizeAll() {
   if (!st.templates) st.templates = buildTemplates();
-  const S = CELL * 9, r = st.rect;
-  const gc = document.createElement('canvas'); gc.width = S; gc.height = S;
-  const gx = gc.getContext('2d', { willReadFrequently: true });
-  gx.imageSmoothingQuality = 'high';
-  gx.drawImage(st.src, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, 0, 0, S, S);
-  const data = gx.getImageData(0, 0, S, S).data;
+  const lum = boardLum();
+  const xs = findLines(lum, GS, 'x'), ys = findLines(lum, GS, 'y');   // 精準對齊 10+10 條格線
+  st.lines = { xs, ys };
+  st.edited.clear();
   const low = new Set();
-  for (let rr = 0; rr < 9; rr++) for (let cc = 0; cc < 9; cc++) {
-    const i = rr * 9 + cc, ex = analyzeCell(data, S, rr, cc);
-    st.feat[i] = ex;
-    if (!ex) { st.grid[i] = 0; continue; }
-    const res = classify(ex);
+  for (let r = 0; r < 9; r++) for (let c = 0; c < 9; c++) {
+    const i = r * 9 + c;
+    const ix = Math.max(3, 0.1 * (xs[c + 1] - xs[c])), iy = Math.max(3, 0.1 * (ys[r + 1] - ys[r]));
+    const cell = sampleCell(lum, GS, xs[c] + ix, ys[r] + iy, xs[c + 1] - ix, ys[r + 1] - iy, CN);
+    let a = analyzeCell(cell, CN, false), suspicious = false;
+    if (!a.ex) {                                   // 嚴格模式判為空格 → 用寬鬆模式再看一次
+      const b = analyzeCell(cell, CN, true);
+      if (b.ex) { a = b; suspicious = true; }      // 救回淡色數字，但要使用者確認
+      else if (a.total >= 10 || b.total >= 10) suspicious = true;   // 有痕跡卻認不出 → 標記
+    }
+    st.feat[i] = a.ex;
+    if (!a.ex) { st.grid[i] = 0; if (suspicious) low.add(i); continue; }
+    const res = classify(a.ex);
     st.grid[i] = res.d;
-    if (res.margin < 1.25 || res.cost > 0.15) low.add(i);
+    if (suspicious || res.margin < 1.25 || res.cost > 0.15) low.add(i);
   }
   st.recog = st.grid.slice();
   return low;
@@ -523,21 +611,51 @@ const cells = [];
 })();
 
 function renderEditGrid(lowSet) {
+  st.lowSet = lowSet || new Set();
   for (let i = 0; i < 81; i++) {
     cells[i].value = st.grid[i] || '';
-    cells[i].classList.toggle('warn', !!(lowSet && lowSet.has(i)));
+    cells[i].classList.toggle('warn', st.lowSet.has(i));
   }
   refreshConflicts();
 }
 
-/* 使用者修正辨識結果：把該格影像當成新樣板「學起來」，下次辨識會更準 */
+/* 左側原圖盤面：用實際格線畫出黃框（需確認）／紅框（衝突） */
+function renderCrop() {
+  const cv = $('cropView');
+  if (!st.src || !st.rect) return;
+  const W = 420, r = st.rect; cv.width = W; cv.height = W;
+  const x = cv.getContext('2d');
+  x.drawImage(st.src, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, 0, 0, W, W);
+  if (!st.lines) return;
+  const f = W / GS, { xs, ys } = st.lines, bad = findConflicts(st.grid);
+  x.lineWidth = 3;
+  for (let i = 0; i < 81; i++) {
+    const rr = (i / 9) | 0, cc = i % 9;
+    const color = bad.has(i) ? '#ef4444' : (st.lowSet.has(i) ? '#f59e0b' : null);
+    if (!color) continue;
+    x.strokeStyle = color;
+    x.strokeRect(xs[cc] * f + 2, ys[rr] * f + 2, (xs[cc + 1] - xs[cc]) * f - 4, (ys[rr + 1] - ys[rr]) * f - 4);
+  }
+}
+
+/* 使用者修正某格：1) 把該格影像學成新樣板  2) 立刻用新樣板重新比對「其他沒改過的格子」 */
 function onCellEdit(i, v) {
-  st.grid[i] = v;
+  st.grid[i] = v; st.edited.add(i); st.lowSet.delete(i);
+  cells[i].classList.remove('warn');
   if (v && v !== st.recog[i] && st.feat[i]) {
     st.learned.push({ d: v, f: st.feat[i].f, asp: st.feat[i].asp });
+    reclassifyOthers();
   }
-  cells[i].classList.remove('warn');
   refreshConflicts();
+}
+function reclassifyOthers() {
+  let changed = 0;
+  for (let i = 0; i < 81; i++) {
+    if (st.edited.has(i) || !st.feat[i]) continue;
+    const d = classify(st.feat[i]).d;
+    if (d !== st.grid[i]) { st.grid[i] = d; cells[i].value = d; changed++; st.lowSet.add(i); cells[i].classList.add('warn'); }
+  }
+  if (changed) setStatus(`已依你的修正重新比對其他格，更動了 ${changed} 格（黃底），請再核對。`);
 }
 
 /* 建立 27 個單位（9 列、9 行、9 宮） */
@@ -562,11 +680,12 @@ function findConflicts(g) {
 function refreshConflicts() {
   const bad = findConflicts(st.grid);
   for (let i = 0; i < 81; i++) cells[i].classList.toggle('bad', bad.has(i));
+  renderCrop();
   return bad;
 }
 
 $('btnClear').addEventListener('click', () => {
-  st.grid.fill(0); st.recog.fill(0);
+  st.grid.fill(0); st.recog.fill(0); st.edited.clear(); st.lowSet = new Set();
   renderEditGrid(null); $('secOut').hidden = true; setStatus('已清空，可手動輸入題目後按「重新解答」。');
 });
 
@@ -637,7 +756,7 @@ function solveAndShow() {
   drawOutput();
   let msg = `解題完成（${ms} ms）。`;
   if (res.capped) msg += ' 未能在時限內確認是否唯一解。';
-  else if (!res.unique) msg += ' 注意：此盤面有多組解，圖中為其中一組（可能題目數字有誤）。';
+  else if (!res.unique) { msg = `⚠ 此盤面有多組解（${ms} ms），圖中只是其中一組，很可能有數字漏辨識或認錯。請對照左側原圖，檢查黃框格子與「原圖有數字、右邊卻空白」的格子。`; setStatus(msg, 'err'); return; }
   setStatus(msg, 'ok');
 }
 $('btnSolve').addEventListener('click', solveAndShow);
