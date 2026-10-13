@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>數獨自動解答小工具</title>
+<style>
+  /* ========== 基本樣式（含深色模式） ========== */
+  :root {
+    color-scheme: light dark;
+    --bg: #f3f4f6;
+    --panel: #ffffff;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --line: #d4d7de;
+    --accent: #2457d6;      /* 解答數字 / 主要按鈕 */
+    --warn: #fde68a;        /* 辨識信心低 */
+    --bad: #fecaca;         /* 數字衝突 */
+    --ok: #166534;
+    --err: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161b; --panel: #1e2128; --text: #e8eaf0; --muted: #9aa1ae;
+      --line: #3a3f4b; --accent: #7aa2ff; --warn: #6b5a1a; --bad: #6b2323;
+      --ok: #86efac; --err: #fca5a5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 14px 60px; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+  }
+  main { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  section[hidden] { display: none; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 0; }
+  button, .filebtn {
+    font: inherit; padding: 8px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  }
+  button:hover, .filebtn:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  @media (prefers-color-scheme: dark) { button.primary { color: #0b1020; } }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input[type=file] { display: none; }
+  .hint { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
+  #status { margin-top: 10px; min-height: 1.6em; font-size: .95rem; }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+
+  /* 預覽畫布（可拖曳四個角校正網格範圍） */
+  .stage { text-align: center; background: var(--bg); border-radius: 8px; padding: 6px; }
+  #preview { max-width: 100%; height: auto; touch-action: none; cursor: crosshair; border-radius: 4px; }
+
+  /* 辨識結果編輯盤面 */
+  #editGrid {
+    display: grid; grid-template-columns: repeat(9, 1fr);
+    width: min(100%, 420px); margin: 0 auto; border: 3px solid var(--text);
+  }
+  #editGrid input {
+    width: 100%; aspect-ratio: 1; min-width: 0; text-align: center; font-size: 1.35rem; font-weight: 600;
+    border: 1px solid var(--line); border-radius: 0; background: var(--panel); color: var(--text); padding: 0;
+  }
+  #editGrid input:focus { outline: 2px solid var(--accent); outline-offset: -2px; position: relative; }
+  #editGrid input.r-bold { border-bottom: 3px solid var(--text); }
+  #editGrid input.c-bold { border-right: 3px solid var(--text); }
+  #editGrid input.warn { background: var(--warn); }
+  #editGrid input.bad  { background: var(--bad); }
+  .legend { text-align: center; color: var(--muted); font-size: .85rem; margin-top: 8px; }
+
+  label.radio { margin-right: 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>數獨自動解答小工具</h1>
+  <p class="sub">上傳數獨截圖或照片，自動辨識、解題，並輸出解答圖片。所有運算都在你的瀏覽器內完成，圖片不會上傳。</p>
+
+  <!-- 步驟 1：上傳與預覽 -->
+  <section>
+    <h2>1. 上傳題目圖片</h2>
+    <div class="row">
+      <label class="filebtn" for="file">選擇圖片…</label>
+      <input type="file" id="file" accept="image/*">
+      <button id="btnDetect" disabled>自動偵測網格</button>
+      <button id="btnRun" class="primary" disabled>開始辨識與解答</button>
+    </div>
+    <p class="hint">紅框應剛好框住 9×9 盤面；若有偏差，拖曳四個角或框內移動來校正，再按「開始辨識與解答」。（手機請從圖片外側捲動頁面）</p>
+    <div class="stage" id="stage" style="margin-top:10px" hidden><canvas id="preview"></canvas></div>
+    <div id="status" role="status"></div>
+  </section>
+
+  <!-- 步驟 2：辨識結果（可修正） -->
+  <section id="secEdit" hidden>
+    <h2>2. 檢查辨識結果</h2>
+    <div id="editGrid"></div>
+    <p class="legend">黃底＝辨識信心較低　紅底＝同行／列／宮有重複數字。點格子即可修改（輸入 1–9，清除則留空）。</p>
+    <div class="row" style="justify-content:center">
+      <button id="btnSolve" class="primary">重新解答</button>
+      <button id="btnClear">清空盤面</button>
+    </div>
+  </section>
+
+  <!-- 步驟 3：解答輸出 -->
+  <section id="secOut" hidden>
+    <h2>3. 解答</h2>
+    <div>
+      <label class="radio"><input type="radio" name="mode" value="clean" checked> 乾淨解答盤</label>
+      <label class="radio"><input type="radio" name="mode" value="overlay"> 疊加在原圖上</label>
+    </div>
+    <canvas id="out" hidden></canvas>
+    <img id="outImg" alt="數獨解答" style="max-width:100%;height:auto;display:block;margin:10px auto 0;border:1px solid var(--line);border-radius:4px;background:#fff">
+    <p class="hint" style="text-align:center">手機也可以直接長按上方圖片 →「儲存圖片」。</p>
+    <div class="row" style="justify-content:center">
+      <button id="btnDownload" class="primary">下載解答圖片 (PNG)</button>
+    </div>
+  </section>
+</main>
+
+<script>
+/* =====================================================================
+ * 數獨自動解答小工具
+ * 流程：上傳圖片 → 偵測網格 → 切 81 格 → 樣板比對辨識數字
+ *       → 使用者修正 → 回溯法解題 → Canvas 繪製解答 → 下載 PNG
+ * ===================================================================== */
+'use strict';
+const $ = id => document.getElementById(id);
+
+/* ---------- 全域狀態 ---------- */
+const st = {
+  src: null,            // 原圖（離屏 canvas，最大邊長限制 3000px）
+  rect: null,           // 網格範圍 {x0,y0,x1,y1}（原圖座標）
+  k: 1,                 // 預覽縮放比例
+  grid: new Array(81).fill(0),     // 目前盤面（0 = 空格）
+  recog: new Array(81).fill(0),    // 程式原始辨識結果（用於判斷使用者是否修正）
+  feat: new Array(81).fill(null),  // 每格的特徵（用於「從修正中學習」）
+  solution: null, givens: null,
+  templates: null,      // 內建字型樣板
+  learned: []           // 使用者修正後學到的樣板
+};
+
+const prev = $('preview'), pctx = prev.getContext('2d');
+const out = $('out'), octx = out.getContext('2d');
+
+function setStatus(msg, type) {
+  const s = $('status'); s.textContent = msg; s.className = type || '';
+}
+
+/* =====================================================================
+ * 一、圖片載入與預覽
+ * ===================================================================== */
+/* 讀取圖片：依序嘗試三種方式，避免某些環境（例如限制 blob: 的預覽視窗）讀不到圖
+ *  1) createImageBitmap(file)  2) FileReader → data URL  3) blob URL */
+async function decodeFile(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file); } catch (e) { console.warn('createImageBitmap 失敗', e); }
+  }
+  const loadUrl = url => new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('decode')); im.src = url;
+  });
+  try {
+    const dataUrl = await new Promise((res, rej) => {
+      const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(file);
+    });
+    return await loadUrl(dataUrl);
+  } catch (e) { console.warn('data URL 失敗', e); }
+  const url = URL.createObjectURL(file);
+  try { return await loadUrl(url); } finally { URL.revokeObjectURL(url); }
+}
+
+$('file').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  setStatus('讀取圖片中…');
+  let img;
+  try { img = await decodeFile(f); }
+  catch (err) {
+    setStatus(`無法讀取這張圖片（格式：${f.type || '未知'}）。請改用 JPG／PNG；iPhone 的 HEIC 照片請先轉成 JPG 或改用截圖。`, 'err');
+    return;
+  }
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  // 限制最大尺寸，避免超大照片拖慢處理
+  const cap = 3000, sc = Math.min(1, cap / Math.max(iw, ih));
+  const c = document.createElement('canvas');
+  c.width = Math.round(iw * sc); c.height = Math.round(ih * sc);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  if (img.close) img.close();
+  st.src = c;
+  $('stage').hidden = false;
+  $('btnDetect').disabled = false; $('btnRun').disabled = false;
+  $('secEdit').hidden = true; $('secOut').hidden = true;
+  layoutPreview();
+  autoDetect();
+  e.target.value = '';   // 允許再次選同一個檔案
+});
+
+function layoutPreview() {
+  if (!st.src) return;
+  const maxW = Math.min(760, $('stage').clientWidth - 12 || 760), maxH = 640;
+  st.k = Math.min(maxW / st.src.width, maxH / st.src.height, 1);
+  prev.width = Math.round(st.src.width * st.k);
+  prev.height = Math.round(st.src.height * st.k);
+  drawPreview();
+}
+window.addEventListener('resize', layoutPreview);
+
+/* 繪製預覽圖與紅色網格框、四個角控制點 */
+function drawPreview() {
+  pctx.drawImage(st.src, 0, 0, prev.width, prev.height);
+  const r = st.rect; if (!r) return;
+  const k = st.k, x0 = r.x0 * k, y0 = r.y0 * k, x1 = r.x1 * k, y1 = r.y1 * k;
+  pctx.lineWidth = 2; pctx.strokeStyle = '#ef4444';
+  pctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  pctx.lineWidth = 1; pctx.strokeStyle = 'rgba(239,68,68,.55)';
+  pctx.beginPath();
+  for (let i = 1; i < 9; i++) {
+    const x = x0 + (x1 - x0) * i / 9, y = y0 + (y1 - y0) * i / 9;
+    pctx.moveTo(x, y0); pctx.lineTo(x, y1);
+    pctx.moveTo(x0, y); pctx.lineTo(x1, y);
+  }
+  pctx.stroke();
+  for (const [x, y] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) {
+    pctx.beginPath(); pctx.arc(x, y, 9, 0, Math.PI * 2);
+    pctx.fillStyle = '#fff'; pctx.fill();
+    pctx.lineWidth = 2; pctx.strokeStyle = '#ef4444'; pctx.stroke();
+  }
+}
+
+/* ---------- 拖曳校正（Pointer Events，滑鼠與觸控通用） ---------- */
+let drag = null;
+function toImg(e) {
+  const b = prev.getBoundingClientRect();
+  return {
+    x: (e.clientX - b.left) * (prev.width / b.width) / st.k,
+    y: (e.clientY - b.top) * (prev.height / b.height) / st.k
+  };
+}
+prev.addEventListener('pointerdown', e => {
+  if (!st.rect) return;
+  const p = toImg(e), r = st.rect, hr = 28 / st.k;
+  const corners = { tl: [r.x0, r.y0], tr: [r.x1, r.y0], bl: [r.x0, r.y1], br: [r.x1, r.y1] };
+  drag = null;
+  for (const key in corners) {
+    if (Math.hypot(p.x - corners[key][0], p.y - corners[key][1]) < hr) { drag = { t: key }; break; }
+  }
+  if (!drag && p.x > r.x0 && p.x < r.x1 && p.y > r.y0 && p.y < r.y1) {
+    drag = { t: 'move', ox: p.x - r.x0, oy: p.y - r.y0, w: r.x1 - r.x0, h: r.y1 - r.y0 };
+  }
+  if (drag) { prev.setPointerCapture(e.pointerId); e.preventDefault(); }
+});
+prev.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const p = toImg(e), r = st.rect, W = st.src.width, H = st.src.height, MIN = 90;
+  const cx = Math.max(0, Math.min(W, p.x)), cy = Math.max(0, Math.min(H, p.y));
+  switch (drag.t) {
+    case 'tl': r.x0 = Math.min(cx, r.x1 - MIN); r.y0 = Math.min(cy, r.y1 - MIN); break;
+    case 'tr': r.x1 = Math.max(cx, r.x0 + MIN); r.y0 = Math.min(cy, r.y1 - MIN); break;
+    case 'bl': r.x0 = Math.min(cx, r.x1 - MIN); r.y1 = Math.max(cy, r.y0 + MIN); break;
+    case 'br': r.x1 = Math.max(cx, r.x0 + MIN); r.y1 = Math.max(cy, r.y0 + MIN); break;
+    case 'move': {
+      const nx = Math.max(0, Math.min(W - drag.w, p.x - drag.ox));
+      const ny = Math.max(0, Math.min(H - drag.h, p.y - drag.oy));
+      r.x0 = nx; r.y0 = ny; r.x1 = nx + drag.w; r.y1 = ny + drag.h; break;
+    }
+  }
+  drawPreview();
+});
+['pointerup', 'pointercancel'].forEach(t => prev.addEventListener(t, () => { drag = null; }));
+
+/* =====================================================================
+ * 二、自動偵測網格
+ *  原理：數獨盤面有 10 條以上「又長又直」的格線。
+ *  1) 分別掃描每一列／行，找出邊緣像素連續出現的最長線段
+ *  2) 把相鄰的線合併成一條，得到水平線群與垂直線群
+ *  3) 垂直線群取「起訖範圍相近」的最大群 → 盤面左右邊界與寬度
+ *  4) 水平線用「高度 ≈ 寬度」（正方形）的視窗挑出盤面上下邊界
+ *  偵測不到時退回置中的正方形，讓使用者手動拖曳。
+ * ===================================================================== */
+function longestRun(n, isEdge, gapTol) {
+  let best = { len: 0, s: 0, e: 0 }, s = -1, last = -1, cnt = 0;
+  for (let i = 0; i <= n; i++) {
+    const on = i < n && isEdge(i);
+    if (on) { if (s < 0) s = i; last = i; cnt++; }
+    else if (s >= 0 && (i >= n || i - last > gapTol)) {
+      const len = last - s + 1;
+      if (cnt >= len * 0.6 && cnt > best.len) best = { len: cnt, s, e: last };
+      s = -1; cnt = 0;
+    }
+  }
+  return best;
+}
+function clusterLines(lines, gap) {
+  const res = [];
+  for (const l of lines) {
+    const c = res[res.length - 1];
+    if (c && l.pos - c.lastPos <= gap) {
+      c.sp += l.pos; c.ss += l.s; c.se += l.e; c.n++; c.lastPos = l.pos;
+    } else res.push({ sp: l.pos, ss: l.s, se: l.e, n: 1, lastPos: l.pos });
+  }
+  return res.map(c => ({ pos: c.sp / c.n, s: c.ss / c.n, e: c.se / c.n }));
+}
+function bestGroup(cl, tol) {
+  let best = [];
+  for (const a of cl) {
+    const g = cl.filter(b => Math.abs(b.s - a.s) < tol && Math.abs(b.e - a.e) < tol);
+    if (g.length > best.length) best = g;
+  }
+  return best;
+}
+
+function detectGrid() {
+  const W0 = st.src.width, H0 = st.src.height;
+  const sc = Math.min(1, 1400 / Math.max(W0, H0));
+  const w = Math.round(W0 * sc), h = Math.round(H0 * sc);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(st.src, 0, 0, w, h);
+  const d = cx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2];
+
+  const T = 18, gapTol = Math.max(3, Math.round(Math.max(w, h) * 0.012));
+  const minLen = 0.4 * Math.min(w, h);
+
+  // 水平線：每一列 y 中，上下像素差異大的點連成的最長線段
+  const hl = [];
+  for (let y = 1; y < h - 1; y++) {
+    const r = longestRun(w, x => Math.abs(g[(y + 1) * w + x] - g[(y - 1) * w + x]) > T, gapTol);
+    if (r.len >= minLen) hl.push({ pos: y, s: r.s, e: r.e });
+  }
+  // 垂直線
+  const vl = [];
+  for (let x = 1; x < w - 1; x++) {
+    const r = longestRun(h, y => Math.abs(g[y * w + x + 1] - g[y * w + x - 1]) > T, gapTol);
+    if (r.len >= minLen) vl.push({ pos: x, s: r.s, e: r.e });
+  }
+  const hCl = clusterLines(hl, 3), vCl = clusterLines(vl, 3);
+  const vG = bestGroup(vCl, 0.03 * Math.max(w, h));
+  if (vG.length < 4 || hCl.length < 4) return null;
+
+  const x0 = Math.min(...vG.map(l => l.pos)), x1 = Math.max(...vG.map(l => l.pos));
+  const span = x1 - x0;
+  // 以「高度≈寬度」的視窗挑出涵蓋最多水平線的一組
+  let hG = [];
+  for (const a of hCl) {
+    const grp = hCl.filter(b => b.pos >= a.pos - 2 && b.pos <= a.pos + span * 1.08);
+    if (grp.length > hG.length) hG = grp;
+  }
+  if (hG.length < 4) return null;
+  const y0 = Math.min(...hG.map(l => l.pos)), y1 = Math.max(...hG.map(l => l.pos));
+  const ratio = (y1 - y0) / span;
+  if (ratio < 0.8 || ratio > 1.25) return null;   // 不像正方形 → 視為偵測失敗
+  return { x0: x0 / sc, y0: y0 / sc, x1: x1 / sc, y1: y1 / sc };
+}
+
+function autoDetect() {
+  let r = null;
+  try { r = detectGrid(); } catch (err) { console.warn(err); }
+  if (r) {
+    st.rect = r;
+    setStatus('已自動偵測到網格。確認紅框貼齊盤面後，按「開始辨識與解答」。', 'ok');
+  } else {
+    const W = st.src.width, H = st.src.height, s = Math.min(W, H) * 0.9;
+    st.rect = { x0: (W - s) / 2, y0: (H - s) / 2, x1: (W + s) / 2, y1: (H + s) / 2 };
+    setStatus('自動偵測失敗，請拖曳紅框四個角對齊盤面。', 'err');
+  }
+  drawPreview();
+}
+$('btnDetect').addEventListener('click', autoDetect);
+
+/* =====================================================================
+ * 三、數字辨識（樣板比對，純前端、無需外部套件）
+ *  1) 把盤面裁切並縮放成 576×576，每格 64×64
+ *  2) 每格取內縮區域，用「與背景的差異」二值化（自動適應深／淺色數字）
+ *  3) 刪掉碰到區域邊緣的連通塊（那是格線），剩下的即數字
+ *  4) 數字外框縮放成 12×16 的灰階特徵，與內建字型樣板 + 學習樣板比對
+ * ===================================================================== */
+const FW = 12, FH = 16;      // 特徵網格大小
+const CELL = 64, INSET = 7;  // 每格尺寸與內縮像素
+
+/* 由二值遮罩取出外框並縮放成 FW×FH 的覆蓋率特徵 */
+function extract(mask, W, H) {
+  let x0 = W, y0 = H, x1 = -1, y1 = -1, cnt = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (mask[y * W + x]) { cnt++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  if (!cnt) return null;
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1, f = new Float32Array(FW * FH);
+  for (let fy = 0; fy < FH; fy++) {
+    const ys = y0 + fy * bh / FH, ye = y0 + (fy + 1) * bh / FH;
+    const iy0 = Math.floor(ys), iy1 = Math.max(iy0, Math.ceil(ye) - 1);
+    for (let fx = 0; fx < FW; fx++) {
+      const xs = x0 + fx * bw / FW, xe = x0 + (fx + 1) * bw / FW;
+      const ix0 = Math.floor(xs), ix1 = Math.max(ix0, Math.ceil(xe) - 1);
+      let sum = 0, n = 0;
+      for (let y = iy0; y <= iy1; y++) for (let x = ix0; x <= ix1; x++) { sum += mask[y * W + x] ? 1 : 0; n++; }
+      f[fy * FW + fx] = sum / n;
+    }
+  }
+  return { f, asp: bw / bh, count: cnt };
+}
+
+/* 以多種系統字型繪製 1–9 作為內建樣板（延遲建立，只做一次） */
+function buildTemplates() {
+  const fonts = ['Arial', 'Helvetica', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Segoe UI', 'Roboto',
+                 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', 'system-ui', 'sans-serif'];
+  const weights = ['300', '400', '600', '700'];
+  const cv = document.createElement('canvas'); cv.width = 80; cv.height = 100;
+  const cx = cv.getContext('2d', { willReadFrequently: true });
+  const list = [];
+  for (let dgt = 1; dgt <= 9; dgt++) for (const fn of fonts) for (const wt of weights) {
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, 80, 100);
+    cx.fillStyle = '#000'; cx.textAlign = 'center'; cx.textBaseline = 'middle';
+    const fam = (fn === 'sans-serif' || fn === 'system-ui') ? fn : `"${fn}", sans-serif`;
+    cx.font = `${wt} 76px ${fam}`;
+    cx.fillText(String(dgt), 40, 54);
+    const px = cx.getImageData(0, 0, 80, 100).data, m = new Uint8Array(8000);
+    for (let i = 0; i < 8000; i++) m[i] = px[4 * i] < 140 ? 1 : 0;
+    const ex = extract(m, 80, 100);
+    if (ex && ex.count > 50) list.push({ d: dgt, f: ex.f, asp: ex.asp });
+  }
+  return list;
+}
+
+/* 分析單一格：回傳 {f, asp} 或 null（空格） */
+function analyzeCell(data, S, r, c) {
+  const n = CELL - 2 * INSET, lum = new Float32Array(n * n);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const i = ((r * CELL + INSET + y) * S + (c * CELL + INSET + x)) * 4;
+    lum[y * n + x] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  const sorted = Float32Array.from(lum).sort();
+  const bg = sorted[sorted.length >> 1];
+  const range = sorted[Math.floor(sorted.length * 0.99)] - sorted[Math.floor(sorted.length * 0.01)];
+  const T = Math.max(35, 0.4 * range);
+  const mask = new Uint8Array(n * n);
+  for (let i = 0; i < n * n; i++) mask[i] = Math.abs(lum[i] - bg) > T ? 1 : 0;
+
+  // 連通塊標記（8 鄰域）；碰到邊緣者（格線）與過小者（雜訊）丟棄
+  const seen = new Uint8Array(n * n), keep = new Uint8Array(n * n), stack = [];
+  let total = 0;
+  for (let i0 = 0; i0 < n * n; i0++) {
+    if (!mask[i0] || seen[i0]) continue;
+    const comp = []; let touch = false;
+    stack.push(i0); seen[i0] = 1;
+    while (stack.length) {
+      const i = stack.pop(); comp.push(i);
+      const x = i % n, y = (i / n) | 0;
+      if (x === 0 || y === 0 || x === n - 1 || y === n - 1) touch = true;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+        const j = ny * n + nx;
+        if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+      }
+    }
+    if (!touch && comp.length >= 6) { for (const i of comp) keep[i] = 1; total += comp.length; }
+  }
+  if (total < 40) return null;
+  return extract(keep, n, n);
+}
+
+/* 與樣板比對，回傳最佳數字與信心（第二名 / 第一名 的代價比） */
+function classify(ex) {
+  const best = new Array(10).fill(Infinity), all = st.templates.concat(st.learned);
+  for (const t of all) {
+    let s = 0;
+    for (let i = 0; i < FW * FH; i++) { const d = ex.f[i] - t.f[i]; s += d * d; }
+    s = s / (FW * FH) + 0.2 * Math.abs(Math.log(ex.asp / t.asp));
+    if (s < best[t.d]) best[t.d] = s;
+  }
+  const order = [1, 2, 3, 4, 5, 6, 7, 8, 9].sort((a, b) => best[a] - best[b]);
+  return { d: order[0], cost: best[order[0]], margin: best[order[1]] / (best[order[0]] + 1e-6) };
+}
+
+function recognizeAll() {
+  if (!st.templates) st.templates = buildTemplates();
+  const S = CELL * 9, r = st.rect;
+  const gc = document.createElement('canvas'); gc.width = S; gc.height = S;
+  const gx = gc.getContext('2d', { willReadFrequently: true });
+  gx.imageSmoothingQuality = 'high';
+  gx.drawImage(st.src, r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0, 0, 0, S, S);
+  const data = gx.getImageData(0, 0, S, S).data;
+  const low = new Set();
+  for (let rr = 0; rr < 9; rr++) for (let cc = 0; cc < 9; cc++) {
+    const i = rr * 9 + cc, ex = analyzeCell(data, S, rr, cc);
+    st.feat[i] = ex;
+    if (!ex) { st.grid[i] = 0; continue; }
+    const res = classify(ex);
+    st.grid[i] = res.d;
+    if (res.margin < 1.25 || res.cost > 0.15) low.add(i);
+  }
+  st.recog = st.grid.slice();
+  return low;
+}
+
+/* =====================================================================
+ * 四、辨識結果編輯盤面
+ * ===================================================================== */
+const cells = [];
+(function buildEditGrid() {
+  const box = $('editGrid');
+  for (let i = 0; i < 81; i++) {
+    const r = (i / 9) | 0, c = i % 9, el = document.createElement('input');
+    el.type = 'text'; el.inputMode = 'numeric'; el.maxLength = 2; el.autocomplete = 'off';
+    el.setAttribute('aria-label', `第 ${r + 1} 列第 ${c + 1} 行`);
+    if (r % 3 === 2 && r !== 8) el.classList.add('r-bold');
+    if (c % 3 === 2 && c !== 8) el.classList.add('c-bold');
+    el.addEventListener('focus', () => el.select());
+    el.addEventListener('input', () => {
+      const v = el.value.replace(/[^1-9]/g, '').slice(-1);
+      el.value = v;
+      onCellEdit(i, v ? +v : 0);
+    });
+    box.appendChild(el); cells.push(el);
+  }
+})();
+
+function renderEditGrid(lowSet) {
+  for (let i = 0; i < 81; i++) {
+    cells[i].value = st.grid[i] || '';
+    cells[i].classList.toggle('warn', !!(lowSet && lowSet.has(i)));
+  }
+  refreshConflicts();
+}
+
+/* 使用者修正辨識結果：把該格影像當成新樣板「學起來」，下次辨識會更準 */
+function onCellEdit(i, v) {
+  st.grid[i] = v;
+  if (v && v !== st.recog[i] && st.feat[i]) {
+    st.learned.push({ d: v, f: st.feat[i].f, asp: st.feat[i].asp });
+  }
+  cells[i].classList.remove('warn');
+  refreshConflicts();
+}
+
+/* 建立 27 個單位（9 列、9 行、9 宮） */
+const UNITS = [];
+for (let k = 0; k < 9; k++) {
+  const row = [], col = [], box = [];
+  for (let j = 0; j < 9; j++) {
+    row.push(k * 9 + j); col.push(j * 9 + k);
+    box.push(((Math.floor(k / 3) * 3 + Math.floor(j / 3)) * 9) + (k % 3) * 3 + (j % 3));
+  }
+  UNITS.push(row, col, box);
+}
+function findConflicts(g) {
+  const bad = new Set();
+  for (const u of UNITS) {
+    const seen = {};
+    for (const i of u) if (g[i]) (seen[g[i]] = seen[g[i]] || []).push(i);
+    for (const k in seen) if (seen[k].length > 1) seen[k].forEach(i => bad.add(i));
+  }
+  return bad;
+}
+function refreshConflicts() {
+  const bad = findConflicts(st.grid);
+  for (let i = 0; i < 81; i++) cells[i].classList.toggle('bad', bad.has(i));
+  return bad;
+}
+
+$('btnClear').addEventListener('click', () => {
+  st.grid.fill(0); st.recog.fill(0);
+  renderEditGrid(null); $('secOut').hidden = true; setStatus('已清空，可手動輸入題目後按「重新解答」。');
+});
+
+/* =====================================================================
+ * 五、數獨求解（回溯法 + 位元遮罩 + MRV 啟發式）
+ *  - rows/cols/boxes 以 bit 記錄每個單位已用數字（bit d 代表數字 d）
+ *  - 每步挑「候選數最少」的空格（MRV），大幅減少回溯
+ *  - 找到第一組解後繼續搜尋（有節點上限），用來判斷是否唯一解
+ * ===================================================================== */
+function solveSudoku(grid) {
+  const a = grid.slice(), rows = new Int16Array(9), cols = new Int16Array(9), boxes = new Int16Array(9);
+  const bx = i => Math.floor(i / 27) * 3 + Math.floor((i % 9) / 3);
+  for (let i = 0; i < 81; i++) {
+    if (!a[i]) continue;
+    const bit = 1 << a[i], r = (i / 9) | 0, c = i % 9, b = bx(i);
+    if ((rows[r] | cols[c] | boxes[b]) & bit) return { solution: null };
+    rows[r] |= bit; cols[c] |= bit; boxes[b] |= bit;
+  }
+  let count = 0, first = null, nodes = 0, capped = false;
+  const BUDGET = 3e6;
+  const pop = m => { let n = 0; while (m) { m &= m - 1; n++; } return n; };
+
+  function dfs() {
+    if (++nodes > BUDGET && first) { capped = true; return true; }
+    let bi = -1, bm = 0, bc = 10;
+    for (let i = 0; i < 81; i++) {
+      if (a[i]) continue;
+      const m = ~(rows[(i / 9) | 0] | cols[i % 9] | boxes[bx(i)]) & 0x3FE;
+      const n = pop(m);
+      if (n === 0) return false;           // 死路，回溯
+      if (n < bc) { bc = n; bi = i; bm = m; if (n === 1) break; }
+    }
+    if (bi < 0) { count++; if (!first) first = a.slice(); return count >= 2; }
+    const r = (bi / 9) | 0, c = bi % 9, b = bx(bi);
+    for (let d = 1; d <= 9; d++) {
+      const bit = 1 << d;
+      if (!(bm & bit)) continue;
+      a[bi] = d; rows[r] |= bit; cols[c] |= bit; boxes[b] |= bit;     // 放入
+      const stop = dfs();
+      a[bi] = 0; rows[r] &= ~bit; cols[c] &= ~bit; boxes[b] &= ~bit;  // 還原
+      if (stop) return true;
+    }
+    return false;
+  }
+  dfs();
+  return { solution: first, unique: count === 1 && !capped, capped };
+}
+
+function solveAndShow() {
+  const bad = refreshConflicts();
+  if (bad.size) {
+    $('secOut').hidden = true;
+    setStatus('盤面有重複數字（紅底格），可能是辨識錯誤，請先修正。', 'err');
+    return;
+  }
+  const filled = st.grid.filter(Boolean).length;
+  if (filled === 0) { setStatus('盤面是空的，請先輸入題目數字。', 'err'); return; }
+  const t0 = performance.now();
+  const res = solveSudoku(st.grid);
+  const ms = Math.round(performance.now() - t0);
+  if (!res.solution) {
+    $('secOut').hidden = true;
+    setStatus('這個盤面無解，通常是有數字辨識錯誤（可對照原圖檢查）。', 'err');
+    return;
+  }
+  st.solution = res.solution; st.givens = st.grid.slice();
+  $('secOut').hidden = false;
+  drawOutput();
+  let msg = `解題完成（${ms} ms）。`;
+  if (res.capped) msg += ' 未能在時限內確認是否唯一解。';
+  else if (!res.unique) msg += ' 注意：此盤面有多組解，圖中為其中一組（可能題目數字有誤）。';
+  setStatus(msg, 'ok');
+}
+$('btnSolve').addEventListener('click', solveAndShow);
+
+/* 主按鈕：辨識 → 顯示可編輯盤面 → 自動解題 */
+$('btnRun').addEventListener('click', async () => {
+  if (!st.src || !st.rect) { setStatus('請先上傳圖片。', 'err'); return; }
+  setStatus('辨識中…'); $('btnRun').disabled = true;
+  await new Promise(r => setTimeout(r, 30));   // 讓畫面先更新狀態文字
+  try {
+    const low = recognizeAll();
+    $('secEdit').hidden = false;
+    renderEditGrid(low);
+    solveAndShow();
+    if (!$('secOut').hidden && low.size) {
+      $('status').textContent += ` 有 ${low.size} 格辨識信心較低（黃底），建議核對。`;
+    }
+    $('secEdit').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    console.error(err); setStatus('辨識發生錯誤：' + err.message, 'err');
+  } finally { $('btnRun').disabled = false; }
+});
+
+/* =====================================================================
+ * 六、輸出繪圖與下載
+ *  - 乾淨解答盤：重新畫一張 900×900 的盤面，題目數字黑色、答案藍色
+ *  - 疊加原圖：把答案藍字畫在原圖空格的中心位置
+ * ===================================================================== */
+const ANS = '#1d4ed8';
+function drawDigit(ctx, text, cx, cy, size, color, outline) {
+  ctx.font = `700 ${size}px "Helvetica Neue", Arial, "PingFang TC", sans-serif`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (outline) { ctx.lineWidth = size * 0.16; ctx.strokeStyle = outline; ctx.lineJoin = 'round'; ctx.strokeText(text, cx, cy + size * 0.04); }
+  ctx.fillStyle = color; ctx.fillText(text, cx, cy + size * 0.04);
+}
+
+function drawOutput() {
+  if (!st.solution) return;
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  if (mode === 'overlay' && st.src && st.rect) drawOverlay(); else drawClean();
+  $('outImg').src = out.toDataURL('image/png');   // 以 <img> 顯示，方便長按儲存
+}
+
+function drawClean() {
+  const S = 900, M = 30, cs = (S - 2 * M) / 9;
+  out.width = S; out.height = S;
+  octx.fillStyle = '#fff'; octx.fillRect(0, 0, S, S);
+  for (let i = 0; i <= 9; i++) {           // 格線：每 3 格較粗
+    octx.strokeStyle = '#111'; octx.lineWidth = i % 3 === 0 ? 4 : 1.2;
+    octx.beginPath(); octx.moveTo(M + i * cs, M); octx.lineTo(M + i * cs, S - M);
+    octx.moveTo(M, M + i * cs); octx.lineTo(S - M, M + i * cs); octx.stroke();
+  }
+  for (let i = 0; i < 81; i++) {
+    const cx = M + (i % 9 + 0.5) * cs, cy = M + (((i / 9) | 0) + 0.5) * cs, given = st.givens[i];
+    drawDigit(octx, String(st.solution[i]), cx, cy, cs * 0.62, given ? '#111' : ANS);
+  }
+}
+
+function drawOverlay() {
+  const k = Math.min(1, 1600 / Math.max(st.src.width, st.src.height));
+  out.width = Math.round(st.src.width * k); out.height = Math.round(st.src.height * k);
+  octx.drawImage(st.src, 0, 0, out.width, out.height);
+  const r = st.rect, x0 = r.x0 * k, y0 = r.y0 * k, cw = (r.x1 - r.x0) * k / 9, ch = (r.y1 - r.y0) * k / 9;
+  for (let i = 0; i < 81; i++) {
+    if (st.givens[i]) continue;
+    const cx = x0 + (i % 9 + 0.5) * cw, cy = y0 + (((i / 9) | 0) + 0.5) * ch;
+    drawDigit(octx, String(st.solution[i]), cx, cy, Math.min(cw, ch) * 0.62, '#2563eb', 'rgba(255,255,255,.95)');
+  }
+}
+document.querySelectorAll('input[name=mode]').forEach(el => el.addEventListener('change', drawOutput));
+
+$('btnDownload').addEventListener('click', () => {
+  if (!st.solution) return;
+  out.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'sudoku-solution.png';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }, 'image/png');
+});
+</script>
+</body>
+</html>
